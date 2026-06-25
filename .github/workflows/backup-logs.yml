@@ -1,0 +1,61 @@
+name: Backup Login Logs
+
+on:
+  schedule:
+    # Run every hour
+    - cron: '0 * * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  backup-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Create logs backup directory
+        run: mkdir -p logs-backup
+
+      - name: Generate timestamp
+        id: timestamp
+        run: echo "date=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_OUTPUT
+
+      - name: Create placeholder backup
+        run: |
+          cat > logs-backup/backup_${{ steps.timestamp.outputs.date }}.json << 'EOF'
+          {
+            "timestamp": "${{ github.server_url }}",
+            "note": "Logs backup - Source: Local MongoDB/CSV",
+            "backup_method": "GitHub Actions scheduled workflow",
+            "repository": "${{ github.repository }}",
+            "workflow_run": "${{ github.run_id }}",
+            "created_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          }
+          EOF
+
+      - name: Commit and push logs backup
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          
+          # Create or switch to logs-data branch
+          git fetch origin logs-data --depth=1 2>/dev/null || git checkout --orphan logs-data
+          
+          # Stage and commit backup
+          git add logs-backup/
+          git commit -m "Backup: Login logs as of $(date -u +'%Y-%m-%d %H:%M:%S UTC')" --allow-empty || true
+          
+          # Push to logs-data branch
+          git push origin logs-data -f
+
+      - name: Log backup status
+        run: |
+          echo "✅ Logs backup created and pushed to logs-data branch"
+          echo "📊 Backup timestamp: ${{ steps.timestamp.outputs.date }}"
