@@ -1,5 +1,4 @@
-import fetch from 'node-fetch';
-
+// fetch is built-in to Node 18+
 const MONGODB_URI = process.env.MONGODB_URI;
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://pgsccgetvjjoerefqitb.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
