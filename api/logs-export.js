@@ -31,17 +31,39 @@ async function connectDB() {
     dbConnected = true;
     return connection;
   } catch (err) {
-    console.warn('⚠️  MongoDB connection failed');
     dbConnected = false;
     return null;
   }
 }
 
+function convertToCSV(logs) {
+  if (logs.length === 0) {
+    return 'timestamp,username,password,attemptNumber,status,userAgent,ipAddress\n';
+  }
+
+  const headers = ['timestamp', 'username', 'password', 'attemptNumber', 'status', 'userAgent', 'ipAddress'];
+  
+  const rows = logs.map(log => {
+    return headers.map(header => {
+      let value = log[header] || '';
+      // Escape CSV values
+      if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
+        value = `"${value.replace(/"/g, '""')}"`;
+      }
+      return value;
+    }).join(',');
+  });
+
+  return headers.join(',') + '\n' + rows.join('\n');
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="login-logs-${new Date().toISOString().split('T')[0]}.csv"`);
 
   if (req.method === 'OPTIONS') {
     res.status(200).end();
@@ -56,23 +78,21 @@ export default async function handler(req, res) {
   try {
     await connectDB();
 
-    const { limit = 100, status, username } = req.query;
-    let query = {};
-    
-    if (status) query.status = status;
-    if (username) query.username = new RegExp(username, 'i');
-    
+    const { limit = 1000, status, username } = req.query;
     let logs = [];
-    let source = 'No data';
-    
+
     if (dbConnected) {
+      // Fetch from MongoDB
+      let query = {};
+      if (status) query.status = status;
+      if (username) query.username = new RegExp(username, 'i');
+      
       logs = await LoginLog.find(query)
         .sort({ timestamp: -1 })
         .limit(parseInt(limit))
         .lean();
-      source = 'MongoDB';
     } else if (fallbackLogs.length > 0) {
-      // Use fallback logs from memory
+      // Use fallback logs
       logs = fallbackLogs
         .filter(log => {
           let matches = true;
@@ -82,16 +102,10 @@ export default async function handler(req, res) {
         })
         .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
         .slice(0, parseInt(limit));
-      source = 'Fallback (CSV)';
     }
-    
-    res.status(200).json({ 
-      success: true, 
-      count: logs.length, 
-      logs, 
-      source,
-      timestamp: new Date().toISOString()
-    });
+
+    const csv = convertToCSV(logs);
+    res.status(200).send(csv);
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ success: false, error: error.message });

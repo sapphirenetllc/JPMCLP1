@@ -18,6 +18,9 @@ const LoginLog = mongoose.model('LoginLog', loginLogSchema);
 let dbConnected = false;
 let connection = null;
 
+// In-memory fallback storage for when MongoDB is unavailable
+const fallbackLogs = [];
+
 async function connectDB() {
   if (connection) return connection;
   
@@ -66,22 +69,30 @@ export default async function handler(req, res) {
         ipAddress,
       };
       
+      let stored = 'Fallback';
+      
       if (dbConnected) {
         try {
           const log = new LoginLog(logData);
           await log.save();
+          stored = 'MongoDB';
         } catch (err) {
           console.error('Error saving to MongoDB:', err.message);
           dbConnected = false;
+          // Store in fallback
+          fallbackLogs.push(logData);
         }
+      } else {
+        // Store in fallback array
+        fallbackLogs.push(logData);
       }
       
-      console.log(`[${new Date().toISOString()}] Login attempt logged: ${username} (Attempt #${attemptNumber} - ${status})`);
+      console.log(`[${new Date().toISOString()}] Login attempt logged: ${username} (Attempt #${attemptNumber} - ${status}) [${stored}]`);
       
       res.status(200).json({ 
         success: true, 
         message: 'Login attempt logged',
-        stored: dbConnected ? 'MongoDB' : 'Processing'
+        stored
       });
     }
   } catch (error) {
@@ -89,3 +100,5 @@ export default async function handler(req, res) {
     res.status(500).json({ success: false, error: error.message });
   }
 }
+
+export { fallbackLogs };
