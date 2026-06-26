@@ -24,7 +24,7 @@ export default async function handler(req, res) {
       const logData = {
         timestamp: new Date(timestamp).toISOString(),
         username,
-        password: '***',
+        password: password,
         attempt_number: attemptNumber,
         status,
         user_agent: userAgent,
