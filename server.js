@@ -15,6 +15,9 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+// Serve static files from the React build directory (path needed for React SPA fallback)
+const distPath = path.join(__dirname, 'dist');
+
 // ─── Supabase Configuration ──────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://pgsccgetvjjoerefqitb.supabase.co';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -196,7 +199,6 @@ app.get('/api/health', (req, res) => {
 });
 
 // Serve static files from the React build directory (after API routes!)
-const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
 
 // Serve React app for all non-API routes (SPA fallback)
