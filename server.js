@@ -50,7 +50,7 @@ if (!fs.existsSync(csvFilePath)) {
 }
 
 // ─── Logging Endpoint ────────────────────────────────────────────
-app.post('/api/logs/login', async (req, res) => {
+app.post('/api/logs-login', async (req, res) => {
   try {
     const { username, password, attemptNumber, status, timestamp, userAgent } = req.body;
     
